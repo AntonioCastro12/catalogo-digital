@@ -3,11 +3,14 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  deleteCloudSale,
   deleteCloudProduct,
   getCloudSession,
   isSupabaseConfigured,
   loadCloudProducts,
+  loadCloudSales,
   saveCloudProduct,
+  saveCloudSale,
   signInCloudAdmin,
   signOutCloudAdmin,
   updateCloudProductFlags,
@@ -26,7 +29,6 @@ import {
   Eye,
   Grid2X2,
   Heart,
-  ImagePlus,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -67,6 +69,23 @@ export type Product = {
   images: string[];
   pieces?: number;
   lotContents?: string[];
+};
+
+export type SaleItem = {
+  productId: number | null;
+  name: string;
+  code: string;
+  quantity: number;
+  unitPrice: number;
+};
+
+export type Sale = {
+  id: string;
+  soldAt: string;
+  customerName: string;
+  notes: string;
+  total: number;
+  items: SaleItem[];
 };
 
 type CartItem = {
@@ -292,6 +311,33 @@ const peso = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value);
 
+const localDateTimeValue = (date = new Date()) => {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+};
+
+const salePeriodSummary = (sales: Sale[]) => {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const week = new Date(today);
+  const weekday = week.getDay() || 7;
+  week.setDate(week.getDate() - weekday + 1);
+  const year = new Date(now.getFullYear(), 0, 1);
+  const summarize = (from: Date) => {
+    const selected = sales.filter((sale) => new Date(sale.soldAt) >= from);
+    return {
+      total: selected.reduce((sum, sale) => sum + sale.total, 0),
+      count: selected.length,
+    };
+  };
+  return { today: summarize(today), week: summarize(week), year: summarize(year) };
+};
+
+const saleDate = (value: string) => new Intl.DateTimeFormat("es-MX", {
+  dateStyle: "medium",
+  timeStyle: "short",
+}).format(new Date(value));
+
 const slugify = (value: string) =>
   value
     .normalize("NFD")
@@ -405,7 +451,6 @@ function Header({ cartCount }: { cartCount: number }) {
           <form className="header-search" onSubmit={submitSearch}>
             <Search size={20} aria-hidden="true" />
             <input
-              autoFocus
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="¿Qué estás buscando?"
@@ -416,8 +461,8 @@ function Header({ cartCount }: { cartCount: number }) {
         )}
       </header>
       {mobileMenu && (
-        <div className="drawer-backdrop" role="presentation" onClick={() => setMobileMenu(false)}>
-          <aside className="mobile-drawer" onClick={(event) => event.stopPropagation()} aria-label="Menú móvil">
+        <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileMenu(false); }}>
+          <aside className="mobile-drawer" aria-label="Menú móvil">
             <div className="drawer-top">
               <span className="brand-name">Fernanda Lara</span>
               <button className="icon-button" onClick={() => setMobileMenu(false)} aria-label="Cerrar menú">
@@ -643,15 +688,13 @@ function CatalogView({
   onAdd: (product: Product) => void;
   forcedCategory?: string;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("q") || "");
   const [category, setCategory] = useState(forcedCategory || "Todos");
   const [sort, setSort] = useState("Destacados");
   const [filterOpen, setFilterOpen] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const initialQuery = params.get("q") || "";
-    setQuery(initialQuery);
     if (params.get("focus") === "search") {
       setTimeout(() => document.getElementById("catalog-search")?.focus(), 200);
     }
@@ -777,13 +820,6 @@ function ProductDetailView({ product, onAdd }: { product?: Product; onAdd: (prod
   const [size, setSize] = useState(product?.sizes[0] || "");
   const [color, setColor] = useState(product?.colors[0] || "");
   const [quantity, setQuantity] = useState(1);
-
-  useEffect(() => {
-    setImageIndex(0);
-    setSize(product?.sizes[0] || "");
-    setColor(product?.colors[0] || "");
-    setQuantity(1);
-  }, [product]);
 
   if (!product) {
     return <main className="not-found"><h1>Producto no encontrado</h1><AppLink href="/catalogo" className="button primary">Volver al catálogo</AppLink></main>;
@@ -1003,6 +1039,7 @@ function AdminLogin({ onLogin, cloudMode }: { onLogin: (email: string, password:
 
 const adminLinks = [
   { label: "Dashboard", path: "/admin/dashboard", icon: LayoutDashboard },
+  { label: "Ventas", path: "/admin/ventas", icon: BarChart3 },
   { label: "Productos", path: "/admin/productos", icon: Package },
   { label: "Ropa", path: "/admin/ropa", icon: Shirt },
   { label: "Calzado", path: "/admin/calzado", icon: ShoppingBag },
@@ -1048,33 +1085,39 @@ function AdminShell({ children, onLogout, mobileOpen, setMobileOpen }: { childre
   );
 }
 
-function AdminDashboard({ products }: { products: Product[] }) {
+function AdminDashboard({ products, sales }: { products: Product[]; sales: Sale[] }) {
+  const periods = salePeriodSummary(sales);
+  const todayLabel = new Intl.DateTimeFormat("es-MX", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  }).format(new Date());
   const stats = [
-    { label: "Productos publicados", value: products.length, note: "+2 este mes", icon: Package, tone: "rose" },
+    { label: "Ventas de hoy", value: peso(periods.today.total), note: `${periods.today.count} ${periods.today.count === 1 ? "venta" : "ventas"}`, icon: BarChart3, tone: "rose" },
+    { label: "Ventas de la semana", value: peso(periods.week.total), note: `${periods.week.count} ventas registradas`, icon: Clock3, tone: "green" },
+    { label: "Ventas del año", value: peso(periods.year.total), note: `${periods.year.count} ventas registradas`, icon: Sparkles, tone: "beige" },
     { label: "Productos disponibles", value: products.filter((p) => p.available).length, note: "Inventario activo", icon: Check, tone: "green" },
-    { label: "Productos agotados", value: products.filter((p) => !p.available).length, note: "Requiere atención", icon: Clock3, tone: "amber" },
-    { label: "Productos en oferta", value: products.filter((p) => p.isOffer).length, note: "Promociones activas", icon: Percent, tone: "pink" },
-    { label: "Lotes activos", value: products.filter((p) => p.category === "Lotes" && p.available).length, note: "Listos para venta", icon: Grid2X2, tone: "beige" },
+    { label: "Productos agotados", value: products.filter((p) => !p.available).length, note: "Requiere atención", icon: Package, tone: "amber" },
   ];
   return (
     <main className="admin-content">
-      <div className="admin-page-heading"><div><span className="eyebrow">Miércoles, 12 de agosto</span><h1>Buenos días, Fernanda</h1><p>Este es el resumen de tu catálogo hoy.</p></div><AppLink href="/admin/agregar" className="button admin-primary"><Plus size={17} /> Agregar producto</AppLink></div>
+      <div className="admin-page-heading"><div><span className="eyebrow">{todayLabel}</span><h1>Buenos días, Fernanda</h1><p>Este es el resumen de tus ventas y tu catálogo.</p></div><AppLink href="/admin/ventas" className="button admin-primary"><Plus size={17} /> Registrar venta</AppLink></div>
       <section className="stats-grid">
         {stats.map(({ label, value, note, icon: Icon, tone }) => <article className="stat-card" key={label}><span className={`stat-icon ${tone}`}><Icon size={20} /></span><div><small>{label}</small><strong>{value}</strong><span>{note}</span></div></article>)}
       </section>
       <section className="admin-dashboard-grid">
         <article className="admin-panel activity-panel">
-          <div className="admin-panel-heading"><div><h2>Productos recientes</h2><p>Últimos artículos agregados al catálogo</p></div><AppLink href="/admin/productos" className="text-link">Ver todos <ArrowRight size={15} /></AppLink></div>
-          <div className="recent-list">
-            {products.slice(0, 5).map((product) => <div className="recent-product" key={product.id}><img src={product.images[0]} alt="" /><div><strong>{product.name}</strong><span>{product.code} · {product.category}</span></div><strong>{peso(product.price)}</strong><span className={product.available ? "status-chip available" : "status-chip unavailable"}>{product.available ? "Disponible" : "Agotado"}</span></div>)}
-          </div>
+          <div className="admin-panel-heading"><div><h2>Ventas recientes</h2><p>Pedidos confirmados que has registrado</p></div><AppLink href="/admin/ventas" className="text-link">Ver todas <ArrowRight size={15} /></AppLink></div>
+          {sales.length ? <div className="recent-list">
+            {sales.slice(0, 5).map((sale) => <div className="recent-sale" key={sale.id}><span className="sale-mark"><ShoppingBag size={17} /></span><div><strong>{sale.customerName || "Venta directa"}</strong><span>{sale.items.map((item) => `${item.quantity} × ${item.name}`).join(", ")}</span></div><strong>{peso(sale.total)}</strong><time>{saleDate(sale.soldAt)}</time></div>)}
+          </div> : <div className="dashboard-empty"><BarChart3 size={25} /><strong>Aún no hay ventas registradas</strong><span>Registra una venta confirmada para comenzar a ver tus totales.</span></div>}
         </article>
         <aside className="admin-panel quick-panel">
           <div className="admin-panel-heading"><div><h2>Acciones rápidas</h2><p>Atajos para tu día</p></div></div>
+          <AppLink href="/admin/ventas" className="quick-action"><span><BarChart3 size={19} /></span><div><strong>Registrar venta</strong><small>Guarda un pedido confirmado</small></div><ChevronRight size={17} /></AppLink>
           <AppLink href="/admin/agregar" className="quick-action"><span><Plus size={19} /></span><div><strong>Nuevo producto</strong><small>Agrega una pieza al catálogo</small></div><ChevronRight size={17} /></AppLink>
           <AppLink href="/admin/ofertas" className="quick-action"><span><Tag size={19} /></span><div><strong>Gestionar ofertas</strong><small>Actualiza tus promociones</small></div><ChevronRight size={17} /></AppLink>
           <AppLink href="/" className="quick-action"><span><Eye size={19} /></span><div><strong>Revisar tienda</strong><small>Mira el catálogo como cliente</small></div><ChevronRight size={17} /></AppLink>
-          <div className="catalog-health"><div><span>Estado del catálogo</span><strong>89%</strong></div><div className="health-bar"><span /></div><p>Tu catálogo luce muy bien. Agrega fotos adicionales a 2 productos.</p></div>
         </aside>
       </section>
     </main>
@@ -1083,10 +1126,11 @@ function AdminDashboard({ products }: { products: Product[] }) {
 
 function AdminProducts({ products, setProducts, filter, showToast }: { products: Product[]; setProducts: React.Dispatch<React.SetStateAction<Product[]>>; filter?: string; showToast: (message: string) => void }) {
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState(filter || "Todos");
+  const [selectedCategory, setSelectedCategory] = useState("Todos");
+  const activeCategory = filter ?? selectedCategory;
   const visible = products.filter((product) => {
     const matchesQuery = slugify(`${product.name} ${product.code}`).includes(slugify(query));
-    const matchesCategory = category === "Todos" || (category === "Ofertas" ? product.isOffer : product.category === category);
+    const matchesCategory = activeCategory === "Todos" || (activeCategory === "Ofertas" ? product.isOffer : product.category === activeCategory);
     return matchesQuery && matchesCategory;
   });
   const toggle = async (id: number, field: "available" | "isOffer") => {
@@ -1117,7 +1161,7 @@ function AdminProducts({ products, setProducts, filter, showToast }: { products:
     <main className="admin-content">
       <div className="admin-page-heading"><div><span className="eyebrow">Catálogo</span><h1>{filter || "Productos"}</h1><p>Administra tus productos, existencias y promociones.</p></div><AppLink href="/admin/agregar" className="button admin-primary"><Plus size={17} /> Agregar producto</AppLink></div>
       <section className="admin-table-panel">
-        <div className="table-tools"><label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nombre o código..." /></label>{!filter && <select value={category} onChange={(event) => setCategory(event.target.value)}><option>Todos</option><option>Ropa</option><option>Calzado</option><option>Lotes</option><option>Ofertas</option></select>}<span>{visible.length} resultados</span></div>
+        <div className="table-tools"><label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nombre o código..." /></label>{!filter && <select value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}><option>Todos</option><option>Ropa</option><option>Calzado</option><option>Lotes</option><option>Ofertas</option></select>}<span>{visible.length} resultados</span></div>
         <div className="table-scroll">
           <table className="products-table">
             <thead><tr><th>Producto</th><th>Código</th><th>Categoría</th><th>Precio</th><th>Disponibilidad</th><th>Oferta</th><th>Acciones</th></tr></thead>
@@ -1125,6 +1169,134 @@ function AdminProducts({ products, setProducts, filter, showToast }: { products:
           </table>
         </div>
         {!visible.length && <div className="admin-empty"><Package size={30} /><strong>No hay productos para mostrar</strong><span>Prueba cambiando los filtros.</span></div>}
+      </section>
+    </main>
+  );
+}
+
+function AdminSales({
+  products,
+  sales,
+  setSales,
+  showToast,
+}: {
+  products: Product[];
+  sales: Sale[];
+  setSales: React.Dispatch<React.SetStateAction<Sale[]>>;
+  showToast: (message: string) => void;
+}) {
+  const [soldAt, setSoldAt] = useState(localDateTimeValue());
+  const [customerName, setCustomerName] = useState("");
+  const [notes, setNotes] = useState("");
+  const [selectedProductId, setSelectedProductId] = useState("");
+  const [quantity, setQuantity] = useState(1);
+  const [items, setItems] = useState<SaleItem[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const periods = salePeriodSummary(sales);
+  const total = items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+
+  const addItem = () => {
+    const product = products.find((item) => item.id === Number(selectedProductId));
+    if (!product) {
+      setFormError("Selecciona un producto para agregarlo a la venta.");
+      return;
+    }
+    const safeQuantity = Math.max(1, Number(quantity) || 1);
+    setItems((current) => {
+      const existing = current.find((item) => item.productId === product.id);
+      if (existing) return current.map((item) => item.productId === product.id ? { ...item, quantity: item.quantity + safeQuantity } : item);
+      return [...current, { productId: product.id, name: product.name, code: product.code, quantity: safeQuantity, unitPrice: product.price }];
+    });
+    setSelectedProductId("");
+    setQuantity(1);
+    setFormError("");
+  };
+
+  const registerSale = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError("");
+    if (!items.length) {
+      setFormError("Agrega al menos un producto antes de registrar la venta.");
+      return;
+    }
+    const date = new Date(soldAt);
+    if (Number.isNaN(date.getTime())) {
+      setFormError("Selecciona una fecha válida.");
+      return;
+    }
+    const sale: Sale = {
+      id: crypto.randomUUID(),
+      soldAt: date.toISOString(),
+      customerName: customerName.trim(),
+      notes: notes.trim(),
+      total,
+      items,
+    };
+    setSaving(true);
+    try {
+      const savedSale = isSupabaseConfigured ? await saveCloudSale(sale) : sale;
+      setSales((current) => [savedSale, ...current].sort((a, b) => new Date(b.soldAt).getTime() - new Date(a.soldAt).getTime()));
+      setSoldAt(localDateTimeValue());
+      setCustomerName("");
+      setNotes("");
+      setItems([]);
+      showToast("Venta registrada correctamente ✓");
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "No se pudo registrar la venta.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeSale = async (sale: Sale) => {
+    if (!window.confirm(`¿Eliminar la venta de ${peso(sale.total)}?`)) return;
+    try {
+      if (isSupabaseConfigured) await deleteCloudSale(sale.id);
+      setSales((current) => current.filter((item) => item.id !== sale.id));
+      showToast("Venta eliminada ✓");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo eliminar la venta.");
+    }
+  };
+
+  const summaryCards = [
+    { label: "Hoy", value: periods.today.total, count: periods.today.count, tone: "rose" },
+    { label: "Esta semana", value: periods.week.total, count: periods.week.count, tone: "green" },
+    { label: "Este año", value: periods.year.total, count: periods.year.count, tone: "beige" },
+  ];
+
+  return (
+    <main className="admin-content">
+      <div className="admin-page-heading"><div><span className="eyebrow">Control de ingresos</span><h1>Ventas</h1><p>Registra aquí los pedidos confirmados y consulta los totales por periodo.</p></div></div>
+      <section className="sales-stats-grid">
+        {summaryCards.map((card) => <article className="sales-stat-card" key={card.label}><span className={`stat-icon ${card.tone}`}><BarChart3 size={20} /></span><div><small>{card.label}</small><strong>{peso(card.value)}</strong><span>{card.count} {card.count === 1 ? "venta" : "ventas"}</span></div></article>)}
+      </section>
+      <section className="sales-layout">
+        <form className="form-panel sales-form" onSubmit={registerSale}>
+          <div className="form-section-heading"><span><Plus size={18} /></span><div><h2>Registrar venta</h2><p>Solo registra una venta cuando el pedido esté confirmado.</p></div></div>
+          <div className="form-grid">
+            <label>Fecha y hora<input required type="datetime-local" value={soldAt} onChange={(event) => setSoldAt(event.target.value)} /></label>
+            <label>Cliente (opcional)<input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Nombre del cliente" /></label>
+          </div>
+          <div className="sale-product-picker">
+            <label>Producto<select value={selectedProductId} onChange={(event) => setSelectedProductId(event.target.value)}><option value="">Seleccionar producto</option>{products.map((product) => <option value={product.id} key={product.id}>{product.code} · {product.name} · {peso(product.price)}</option>)}</select></label>
+            <label>Cantidad<input min="1" type="number" value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value)))} /></label>
+            <button className="button secondary" type="button" onClick={addItem}><Plus size={16} /> Agregar</button>
+          </div>
+          <div className="sale-draft">
+            {items.length ? items.map((item) => <div className="sale-draft-item" key={`${item.productId}-${item.code}`}><div><strong>{item.name}</strong><span>{item.code} · {peso(item.unitPrice)} c/u</span></div><label><span>Cantidad</span><input min="1" type="number" value={item.quantity} onChange={(event) => setItems((current) => current.map((currentItem) => currentItem.productId === item.productId ? { ...currentItem, quantity: Math.max(1, Number(event.target.value)) } : currentItem))} /></label><strong>{peso(item.unitPrice * item.quantity)}</strong><button type="button" onClick={() => setItems((current) => current.filter((currentItem) => currentItem.productId !== item.productId))} aria-label={`Quitar ${item.name}`}><Trash2 size={16} /></button></div>) : <div className="sale-draft-empty"><ShoppingBag size={22} /><span>Agrega los productos vendidos.</span></div>}
+          </div>
+          <label className="sale-notes">Notas (opcional)<textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Talla, color, entrega u otra referencia..." /></label>
+          {formError && <div className="form-error" role="alert">{formError}</div>}
+          <div className="sale-total"><span>Total de la venta</span><strong>{peso(total)}</strong></div>
+          <button className="button admin-primary sale-submit" type="submit" disabled={saving || !items.length}><Check size={17} /> {saving ? "Guardando..." : "Registrar venta"}</button>
+        </form>
+
+        <article className="admin-table-panel sales-history">
+          <div className="admin-panel-heading"><div><h2>Historial de ventas</h2><p>{sales.length} {sales.length === 1 ? "venta registrada" : "ventas registradas"}</p></div></div>
+          {sales.length ? <div className="sales-list">{sales.map((sale) => <div className="sale-history-item" key={sale.id}><span className="sale-mark"><ShoppingBag size={17} /></span><div className="sale-history-main"><strong>{sale.customerName || "Venta directa"}</strong><span>{sale.items.map((item) => `${item.quantity} × ${item.name}`).join(", ")}</span><time>{saleDate(sale.soldAt)}</time>{sale.notes && <small>{sale.notes}</small>}</div><strong>{peso(sale.total)}</strong><button type="button" onClick={() => { void removeSale(sale); }} aria-label="Eliminar venta"><Trash2 size={16} /></button></div>)}</div> : <div className="admin-empty compact"><BarChart3 size={30} /><strong>No hay ventas registradas</strong><span>Tu historial aparecerá aquí.</span></div>}
+        </article>
       </section>
     </main>
   );
@@ -1175,7 +1347,36 @@ function AdminProductForm({
         canvas.height = Math.max(1, Math.round(preview.height * scale));
         const context = canvas.getContext("2d");
         if (!context) return reject(new Error("No se pudo procesar la imagen."));
+        context.fillStyle = "#f8f5f2";
+        context.fillRect(0, 0, canvas.width, canvas.height);
         context.drawImage(preview, 0, 0, canvas.width, canvas.height);
+        const watermark = "Fernanda Lara";
+        const shortSide = Math.min(canvas.width, canvas.height);
+        const fontSize = Math.max(18, Math.min(48, Math.round(shortSide * 0.055)));
+        const padding = Math.max(14, Math.round(fontSize * 0.8));
+        const watermarkX = canvas.width - padding;
+        const watermarkY = canvas.height - padding;
+        context.save();
+        context.font = `italic 600 ${fontSize}px Georgia, "Times New Roman", serif`;
+        context.textAlign = "right";
+        context.textBaseline = "bottom";
+        const textWidth = context.measureText(watermark).width;
+        const lineY = watermarkY - fontSize * 1.18;
+        context.beginPath();
+        context.moveTo(watermarkX - textWidth, lineY);
+        context.lineTo(watermarkX, lineY);
+        context.strokeStyle = "rgba(216, 161, 171, 0.92)";
+        context.lineWidth = Math.max(2, fontSize * 0.055);
+        context.stroke();
+        context.lineJoin = "round";
+        context.strokeStyle = "rgba(45, 34, 37, 0.5)";
+        context.lineWidth = Math.max(1.5, fontSize * 0.075);
+        context.shadowColor = "rgba(0, 0, 0, 0.38)";
+        context.shadowBlur = Math.max(3, fontSize * 0.16);
+        context.strokeText(watermark, watermarkX, watermarkY);
+        context.fillStyle = "rgba(255, 255, 255, 0.92)";
+        context.fillText(watermark, watermarkX, watermarkY);
+        context.restore();
         resolve(canvas.toDataURL("image/jpeg", 0.8));
       };
       preview.src = source;
@@ -1272,11 +1473,12 @@ function AdminProductForm({
         </section>
         <section className="form-panel">
           <div className="form-section-heading"><span>02</span><div><h2>Precio y disponibilidad</h2><p>Define el precio y el estado del producto.</p></div></div>
-          <div className="form-grid"><label>Precio actual<div className="money-input"><span>$</span><input required min="0" type="number" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="0" /></div></label><label>Precio anterior<div className="money-input"><span>$</span><input min="0" type="number" value={previousPrice} onChange={(event) => setPreviousPrice(event.target.value)} placeholder="Opcional" /></div></label><label className="switch-label"><span><strong>Producto en oferta</strong><small>Aparecerá automáticamente en Ofertas.</small></span><button type="button" className={offer ? "switch on" : "switch"} onClick={() => setOffer((value) => !value)}><span /></button></label><label className="switch-label"><span><strong>Producto disponible</strong><small>Los clientes podrán agregarlo al carrito.</small></span><button type="button" className={available ? "switch on" : "switch"} onClick={() => setAvailable((value) => !value)}><span /></button></label></div>
+          <div className="form-grid"><label>Precio actual<div className="money-input"><span>$</span><input required min="0" type="number" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="0" /></div></label><label>Precio anterior<div className="money-input"><span>$</span><input min="0" type="number" value={previousPrice} onChange={(event) => setPreviousPrice(event.target.value)} placeholder="Opcional" /></div></label><div className="switch-label"><span><strong>Producto en oferta</strong><small>Aparecerá automáticamente en Ofertas.</small></span><button type="button" className={offer ? "switch on" : "switch"} onClick={() => setOffer((value) => !value)} aria-label="Cambiar estado de oferta"><span /></button></div><div className="switch-label"><span><strong>Producto disponible</strong><small>Los clientes podrán agregarlo al carrito.</small></span><button type="button" className={available ? "switch on" : "switch"} onClick={() => setAvailable((value) => !value)} aria-label="Cambiar disponibilidad"><span /></button></div></div>
         </section>
         <section className="form-panel">
           <div className="form-section-heading"><span>03</span><div><h2>Fotografías</h2><p>La primera imagen será la portada del producto.</p></div></div>
-          <label className={uploading ? "upload-zone uploading" : "upload-zone"}><input type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={uploading} onChange={(event) => { void uploadImages(event.target.files); event.target.value = ""; }} /><span>{uploading ? <Clock3 size={25} /> : <Upload size={25} />}</span><strong>{uploading ? "Optimizando fotografías..." : "Arrastra tus fotos aquí o haz clic para subir"}</strong><small>JPG, PNG o WEBP · Máximo 8 fotografías</small></label>
+          <label className={uploading ? "upload-zone uploading" : "upload-zone"}><input type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={uploading} onChange={(event) => { void uploadImages(event.target.files); event.target.value = ""; }} /><span>{uploading ? <Clock3 size={25} /> : <Upload size={25} />}</span><strong>{uploading ? "Optimizando y agregando marca de agua..." : "Arrastra tus fotos aquí o haz clic para subir"}</strong><small>JPG, PNG o WEBP · Máximo 8 fotografías</small></label>
+          <div className="watermark-note"><ShieldCheck size={18} /><div><strong>Marca de agua automática: Fernanda Lara</strong><span>Se agrega a cada fotografía nueva antes de guardarla. Las fotos que ya existían no cambian hasta que vuelvas a subirlas.</span></div></div>
           {images.length > 0 && <><p className="image-help">Usa la estrella para elegir la portada. También puedes cambiar el orden o eliminar fotografías.</p><div className="uploaded-images">{images.map((image, index) => <div className="uploaded-image" key={`${image.slice(0, 30)}-${index}`}><img src={image} alt={`Fotografía ${index + 1} de ${name || "producto"}`} />{index === 0 && <span>Principal</span>}<div><button type="button" disabled={index === 0} onClick={() => makeMainImage(index)} aria-label="Usar como imagen principal" title="Usar como principal"><Star size={15} /></button><button type="button" disabled={index === 0} onClick={() => moveImage(index, -1)} aria-label="Mover antes" title="Mover antes"><ChevronLeft size={15} /></button><button type="button" disabled={index === images.length - 1} onClick={() => moveImage(index, 1)} aria-label="Mover después" title="Mover después"><ChevronRight size={15} /></button><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label="Eliminar imagen" title="Eliminar"><Trash2 size={15} /></button></div></div>)}</div></>}
         </section>
         <section className="form-panel">
@@ -1290,7 +1492,7 @@ function AdminProductForm({
   );
 }
 
-function AdminView({ products, setProducts, showToast }: { products: Product[]; setProducts: React.Dispatch<React.SetStateAction<Product[]>>; showToast: (message: string) => void }) {
+function AdminView({ products, setProducts, sales, setSales, showToast }: { products: Product[]; setProducts: React.Dispatch<React.SetStateAction<Product[]>>; sales: Sale[]; setSales: React.Dispatch<React.SetStateAction<Sale[]>>; showToast: (message: string) => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const [loggedIn, setLoggedIn] = useState(false);
@@ -1301,7 +1503,9 @@ function AdminView({ products, setProducts, showToast }: { products: Product[]; 
     const checkSession = async () => {
       try {
         const session = isSupabaseConfigured ? await getCloudSession() : null;
-        if (active) setLoggedIn(isSupabaseConfigured ? Boolean(session) : localStorage.getItem("fl_admin_session") === "active");
+        const hasSession = isSupabaseConfigured ? Boolean(session) : localStorage.getItem("fl_admin_session") === "active";
+        if (active) setLoggedIn(hasSession);
+        if (active && isSupabaseConfigured && session) setSales(await loadCloudSales());
       } catch {
         if (active) setLoggedIn(false);
       } finally {
@@ -1310,10 +1514,13 @@ function AdminView({ products, setProducts, showToast }: { products: Product[]; 
     };
     void checkSession();
     return () => { active = false; };
-  }, []);
+  }, [setSales]);
   if (!checked) return <div className="admin-loading"><span className="brand-name">Fernanda Lara</span></div>;
   if (!loggedIn) return <AdminLogin cloudMode={isSupabaseConfigured} onLogin={async (email, password) => {
-    if (isSupabaseConfigured) await signInCloudAdmin(email, password);
+    if (isSupabaseConfigured) {
+      await signInCloudAdmin(email, password);
+      setSales(await loadCloudSales());
+    }
     else localStorage.setItem("fl_admin_session", "active");
     setLoggedIn(true);
     router.push("/admin/dashboard");
@@ -1321,8 +1528,9 @@ function AdminView({ products, setProducts, showToast }: { products: Product[]; 
   const pathParts = pathname.split("/");
   const section = pathParts[2] || "dashboard";
   const editingProduct = section === "editar" ? products.find((item) => item.id === Number(pathParts[3])) : undefined;
-  const content = section === "dashboard" ? <AdminDashboard products={products} />
-    : section === "agregar" ? <AdminProductForm products={products} setProducts={setProducts} onSaved={showToast} />
+  const content = section === "dashboard" ? <AdminDashboard products={products} sales={sales} />
+    : section === "ventas" ? <AdminSales products={products} sales={sales} setSales={setSales} showToast={showToast} />
+      : section === "agregar" ? <AdminProductForm products={products} setProducts={setProducts} onSaved={showToast} />
       : section === "editar" && editingProduct ? <AdminProductForm products={products} setProducts={setProducts} product={editingProduct} onSaved={showToast} />
         : section === "editar" ? <main className="admin-content"><div className="admin-empty"><Package size={30} /><strong>Producto no encontrado</strong><span>Es posible que haya sido eliminado.</span><AppLink href="/admin/productos" className="button secondary">Volver a productos</AppLink></div></main>
       : section === "configuracion" ? <main className="admin-content"><div className="admin-page-heading"><div><span className="eyebrow">Cuenta</span><h1>Configuración</h1><p>Datos generales de la tienda y contacto.</p></div></div><section className="form-panel settings-panel"><div className="form-section-heading"><span><Settings size={18} /></span><div><h2>Información de la tienda</h2><p>Estos datos se mostrarán a tus clientes.</p></div></div><div className="form-grid"><label>Nombre de la tienda<input defaultValue="Fernanda Lara" /></label><label>Número de WhatsApp<input defaultValue="+52 1 000 000 0000" /></label><label className="span-2">Descripción<textarea rows={4} defaultValue="Moda, calzado y lotes elegidos con intención para ti." /></label></div><div className="form-actions"><button className="button admin-primary" onClick={() => showToast("Configuración guardada ✓")}>Guardar cambios</button></div></section></main>
@@ -1331,6 +1539,7 @@ function AdminView({ products, setProducts, showToast }: { products: Product[]; 
     const logout = async () => {
       if (isSupabaseConfigured) await signOutCloudAdmin();
       else localStorage.removeItem("fl_admin_session");
+      if (isSupabaseConfigured) setSales([]);
       setLoggedIn(false);
       router.push("/admin");
     };
@@ -1348,6 +1557,7 @@ function Footer() {
         <div className="footer-note"><Sparkles size={20} /><p>Elige tus productos y envía tu pedido completo a Fernanda en un solo mensaje.</p></div>
       </div>
       <div className="footer-bottom container"><span>© 2026 Fernanda Lara</span><span>Hecho con detalle en México</span><AppLink href="/admin">Administrar tienda</AppLink></div>
+      <div className="footer-bottom container"><span>© Desarrollado por RCM CodeDev</span><span>Hecho con detalle en México</span><AppLink href="https://www.facebook.com/RCMCodeDev/" children={undefined}></AppLink></div>
     </footer>
   );
 }
@@ -1355,6 +1565,7 @@ function Footer() {
 export function StoreApp() {
   const pathname = usePathname();
   const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
+  const [sales, setSales] = useState<Sale[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [cartReady, setCartReady] = useState(false);
   const [catalogReady, setCatalogReady] = useState(false);
@@ -1371,6 +1582,8 @@ export function StoreApp() {
         } else {
           const storedProducts = localStorage.getItem("fernanda_lara_products");
           if (storedProducts) setProducts(JSON.parse(storedProducts));
+          const storedSales = localStorage.getItem("fernanda_lara_sales");
+          if (storedSales) setSales(JSON.parse(storedSales));
         }
       } catch (error) {
         console.error("No se pudo cargar el catálogo:", error);
@@ -1383,6 +1596,7 @@ export function StoreApp() {
   }, []);
   useEffect(() => { if (cartReady) localStorage.setItem("fernanda_lara_cart", JSON.stringify(cart)); }, [cart, cartReady]);
   useEffect(() => { if (catalogReady && !isSupabaseConfigured) localStorage.setItem("fernanda_lara_products", JSON.stringify(products)); }, [products, catalogReady]);
+  useEffect(() => { if (catalogReady && !isSupabaseConfigured) localStorage.setItem("fernanda_lara_sales", JSON.stringify(sales)); }, [sales, catalogReady]);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -1402,11 +1616,11 @@ export function StoreApp() {
   };
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
 
-  if (pathname.startsWith("/admin")) return <><AdminView products={products} setProducts={setProducts} showToast={showToast} />{toast && <div className="toast admin-toast"><Check size={18} />{toast}</div>}</>;
+  if (pathname.startsWith("/admin")) return <><AdminView products={products} setProducts={setProducts} sales={sales} setSales={setSales} showToast={showToast} />{toast && <div className="toast admin-toast"><Check size={18} />{toast}</div>}</>;
 
   let content: React.ReactNode;
   if (pathname === "/carrito") content = <CartView items={cart} updateQuantity={(key, quantity) => setCart((current) => current.map((item) => item.key === key ? { ...item, quantity } : item))} removeItem={(key) => { setCart((current) => current.filter((item) => item.key !== key)); showToast("Producto eliminado"); }} />;
-  else if (pathname.startsWith("/producto/")) content = <ProductDetailView product={products.find((product) => product.id === Number(pathname.split("/")[2]))} onAdd={addToCart} />;
+  else if (pathname.startsWith("/producto/")) content = <ProductDetailView key={pathname} product={products.find((product) => product.id === Number(pathname.split("/")[2]))} onAdd={addToCart} />;
   else if (pathname.startsWith("/categoria/")) {
     const slug = pathname.split("/")[2];
     const category = slug === "ropa" ? "Ropa" : slug === "calzado" ? "Calzado" : slug === "lotes" ? "Lotes" : "Ofertas";

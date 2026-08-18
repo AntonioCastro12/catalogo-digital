@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import type { Product } from "../app/StoreApp";
+import type { Product, Sale } from "../app/StoreApp";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const supabaseKey =
@@ -31,6 +31,21 @@ type ProductRow = {
   pieces: number | null;
   lot_contents: string[] | null;
   product_images?: Array<{ image_url: string; position: number }>;
+};
+
+type SaleRow = {
+  id: string;
+  sold_at: string;
+  customer_name: string | null;
+  notes: string | null;
+  total: number | string;
+  sale_items?: Array<{
+    product_id: number | null;
+    product_name: string;
+    product_code: string;
+    quantity: number;
+    unit_price: number | string;
+  }>;
 };
 
 const requireClient = () => {
@@ -168,6 +183,65 @@ export async function updateCloudProductFlags(
   if (values.available !== undefined) payload.available = values.available;
   if (values.isOffer !== undefined) payload.is_offer = values.isOffer;
   const { error } = await client.from("products").update(payload).eq("id", productId);
+  if (error) throw error;
+}
+
+const mapSale = (row: SaleRow): Sale => ({
+  id: row.id,
+  soldAt: row.sold_at,
+  customerName: row.customer_name ?? "",
+  notes: row.notes ?? "",
+  total: Number(row.total),
+  items: (row.sale_items ?? []).map((item) => ({
+    productId: item.product_id,
+    name: item.product_name,
+    code: item.product_code,
+    quantity: item.quantity,
+    unitPrice: Number(item.unit_price),
+  })),
+});
+
+export async function loadCloudSales(): Promise<Sale[]> {
+  const client = requireClient();
+  const { data, error } = await client
+    .from("sales")
+    .select("id, sold_at, customer_name, notes, total, sale_items(product_id, product_name, product_code, quantity, unit_price)")
+    .order("sold_at", { ascending: false });
+  if (error) throw error;
+  return ((data ?? []) as SaleRow[]).map(mapSale);
+}
+
+export async function saveCloudSale(sale: Sale): Promise<Sale> {
+  const client = requireClient();
+  const { error: saleError } = await client.from("sales").insert({
+    id: sale.id,
+    sold_at: sale.soldAt,
+    customer_name: sale.customerName || null,
+    notes: sale.notes || null,
+    total: sale.total,
+  });
+  if (saleError) throw saleError;
+
+  const { error: itemsError } = await client.from("sale_items").insert(
+    sale.items.map((item) => ({
+      sale_id: sale.id,
+      product_id: item.productId,
+      product_name: item.name,
+      product_code: item.code,
+      quantity: item.quantity,
+      unit_price: item.unitPrice,
+    })),
+  );
+  if (itemsError) {
+    await client.from("sales").delete().eq("id", sale.id);
+    throw itemsError;
+  }
+  return sale;
+}
+
+export async function deleteCloudSale(saleId: string) {
+  const client = requireClient();
+  const { error } = await client.from("sales").delete().eq("id", saleId);
   if (error) throw error;
 }
 

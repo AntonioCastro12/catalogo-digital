@@ -34,8 +34,41 @@ create table if not exists public.admin_users (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.sales (
+  id uuid primary key default gen_random_uuid(),
+  sold_at timestamptz not null default now(),
+  customer_name text,
+  notes text,
+  total numeric(12, 2) not null check (total >= 0),
+  created_by uuid not null default auth.uid() references auth.users(id) on delete restrict,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.sale_items (
+  id bigint generated always as identity primary key,
+  sale_id uuid not null references public.sales(id) on delete cascade,
+  product_id bigint references public.products(id) on delete set null,
+  product_name text not null,
+  product_code text not null,
+  quantity integer not null check (quantity > 0),
+  unit_price numeric(12, 2) not null check (unit_price >= 0),
+  created_at timestamptz not null default now()
+);
+
 create index if not exists product_images_product_position_idx
   on public.product_images(product_id, position);
+
+create index if not exists sales_sold_at_idx
+  on public.sales(sold_at desc);
+
+create index if not exists sales_created_by_idx
+  on public.sales(created_by);
+
+create index if not exists sale_items_sale_id_idx
+  on public.sale_items(sale_id);
+
+create index if not exists sale_items_product_id_idx
+  on public.sale_items(product_id);
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -57,8 +90,14 @@ for each row execute function public.set_updated_at();
 alter table public.products enable row level security;
 alter table public.product_images enable row level security;
 alter table public.admin_users enable row level security;
+alter table public.sales enable row level security;
+alter table public.sale_items enable row level security;
 
-create or replace function public.is_catalog_admin()
+create schema if not exists private;
+revoke all on schema private from public;
+grant usage on schema private to authenticated;
+
+create or replace function private.is_catalog_admin()
 returns boolean
 language sql
 stable
@@ -72,8 +111,8 @@ as $$
   );
 $$;
 
-revoke all on function public.is_catalog_admin() from public;
-grant execute on function public.is_catalog_admin() to authenticated;
+revoke all on function private.is_catalog_admin() from public;
+grant execute on function private.is_catalog_admin() to authenticated;
 
 drop policy if exists "Catalogo visible para todos" on public.products;
 create policy "Catalogo visible para todos"
@@ -85,20 +124,20 @@ drop policy if exists "Administrador crea productos" on public.products;
 create policy "Administrador crea productos"
 on public.products for insert
 to authenticated
-with check (public.is_catalog_admin());
+with check ((select private.is_catalog_admin()));
 
 drop policy if exists "Administrador actualiza productos" on public.products;
 create policy "Administrador actualiza productos"
 on public.products for update
 to authenticated
-using (public.is_catalog_admin())
-with check (public.is_catalog_admin());
+using ((select private.is_catalog_admin()))
+with check ((select private.is_catalog_admin()));
 
 drop policy if exists "Administrador elimina productos" on public.products;
 create policy "Administrador elimina productos"
 on public.products for delete
 to authenticated
-using (public.is_catalog_admin());
+using ((select private.is_catalog_admin()));
 
 drop policy if exists "Fotos visibles para todos" on public.product_images;
 create policy "Fotos visibles para todos"
@@ -110,20 +149,59 @@ drop policy if exists "Administrador crea fotos" on public.product_images;
 create policy "Administrador crea fotos"
 on public.product_images for insert
 to authenticated
-with check (public.is_catalog_admin());
+with check ((select private.is_catalog_admin()));
 
 drop policy if exists "Administrador actualiza fotos" on public.product_images;
 create policy "Administrador actualiza fotos"
 on public.product_images for update
 to authenticated
-using (public.is_catalog_admin())
-with check (public.is_catalog_admin());
+using ((select private.is_catalog_admin()))
+with check ((select private.is_catalog_admin()));
 
 drop policy if exists "Administrador elimina fotos" on public.product_images;
 create policy "Administrador elimina fotos"
 on public.product_images for delete
 to authenticated
-using (public.is_catalog_admin());
+using ((select private.is_catalog_admin()));
+
+drop policy if exists "Administrador consulta ventas" on public.sales;
+create policy "Administrador consulta ventas"
+on public.sales for select
+to authenticated
+using ((select private.is_catalog_admin()));
+
+drop policy if exists "Administrador crea ventas" on public.sales;
+create policy "Administrador crea ventas"
+on public.sales for insert
+to authenticated
+with check (
+  (select private.is_catalog_admin())
+  and created_by = (select auth.uid())
+);
+
+drop policy if exists "Administrador elimina ventas" on public.sales;
+create policy "Administrador elimina ventas"
+on public.sales for delete
+to authenticated
+using ((select private.is_catalog_admin()));
+
+drop policy if exists "Administrador consulta partidas" on public.sale_items;
+create policy "Administrador consulta partidas"
+on public.sale_items for select
+to authenticated
+using ((select private.is_catalog_admin()));
+
+drop policy if exists "Administrador crea partidas" on public.sale_items;
+create policy "Administrador crea partidas"
+on public.sale_items for insert
+to authenticated
+with check ((select private.is_catalog_admin()));
+
+drop policy if exists "Administrador elimina partidas" on public.sale_items;
+create policy "Administrador elimina partidas"
+on public.sale_items for delete
+to authenticated
+using ((select private.is_catalog_admin()));
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
@@ -148,20 +226,31 @@ drop policy if exists "Administrador sube fotos" on storage.objects;
 create policy "Administrador sube fotos"
 on storage.objects for insert
 to authenticated
-with check (bucket_id = 'product-images' and public.is_catalog_admin());
+with check (bucket_id = 'product-images' and (select private.is_catalog_admin()));
 
 drop policy if exists "Administrador reemplaza fotos" on storage.objects;
 create policy "Administrador reemplaza fotos"
 on storage.objects for update
 to authenticated
-using (bucket_id = 'product-images' and public.is_catalog_admin())
-with check (bucket_id = 'product-images' and public.is_catalog_admin());
+using (bucket_id = 'product-images' and (select private.is_catalog_admin()))
+with check (bucket_id = 'product-images' and (select private.is_catalog_admin()));
 
 drop policy if exists "Administrador elimina fotos almacenadas" on storage.objects;
 create policy "Administrador elimina fotos almacenadas"
 on storage.objects for delete
 to authenticated
-using (bucket_id = 'product-images' and public.is_catalog_admin());
+using (bucket_id = 'product-images' and (select private.is_catalog_admin()));
+
+-- Permisos explícitos para la Data API (RLS sigue siendo la autorización final).
+grant usage on schema public to anon, authenticated;
+grant select on table public.products, public.product_images to anon, authenticated;
+grant insert, update, delete on table public.products, public.product_images to authenticated;
+grant select, insert, delete on table public.sales, public.sale_items to authenticated;
+grant usage, select on sequence public.product_images_id_seq, public.sale_items_id_seq to authenticated;
+revoke all on table public.sales, public.sale_items from anon;
+
+-- Limpia la función pública usada por versiones anteriores del archivo.
+drop function if exists public.is_catalog_admin();
 
 -- Después de crear a Fernanda en Authentication > Users, autorízala una sola vez:
 -- insert into public.admin_users (user_id)
